@@ -139,7 +139,7 @@ _P_CONTENT = {
     ]
 }
 _P_SPACE = {"parameters": [qp("expand"), qp("limit", "integer"), qp("start", "integer")]}
-# The three listings under `content/{id}`, which read the same pair with their own defaults and
+# The four listings under `content/{id}`, which read the same pair with their own defaults and
 # caps. `child/page` is the one of them this router also reads an `expand` on.
 _P_CHILD_PAGE = {"parameters": [qp("expand"), qp("limit", "integer"), qp("start", "integer")]}
 _P_CONTENT_CHILD = {"parameters": [qp("limit", "integer"), qp("start", "integer")]}
@@ -1601,6 +1601,32 @@ async def confluence_comments(content_id: int, request: Request):
     }
 
 
+@router.get("/wiki/rest/api/content/{content_id}/child/attachment", openapi_extra=_P_CONTENT_CHILD)
+async def confluence_attachments(content_id: int, request: Request):
+    conn = auth.conn(request)
+    caller = _confluence_caller(request)
+    ids = auth.visible_ids(request, caller)
+    if store.get_document(conn, "confluence", content_id, visible_ids=ids) is None:
+        raise HTTPException(status_code=404, detail="No content found with id")
+    limit, start = _confluence_page_params(request, default=50)
+    attachments: list = []
+    page = attachments[start : start + limit]
+    return {
+        "results": page,
+        "start": start,
+        "limit": limit,
+        "size": len(page),
+        "_links": _confluence_envelope(
+            request,
+            f"/rest/api/content/{content_id}/child/attachment",
+            start=start,
+            limit=limit,
+            size=len(page),
+            total=len(attachments),
+        ),
+    }
+
+
 @router.get("/wiki/rest/api/content/{content_id}/label", openapi_extra=_P_CONTENT_CHILD)
 async def confluence_labels(content_id: int, request: Request):
     conn = auth.conn(request)
@@ -1988,7 +2014,7 @@ def _confluence_page_params(
 ) -> tuple[int, int]:
     """Confluence's `limit` and `start`, which refuse a negative where Jira's clamp one.
 
-    Measured on the five routes that call it, `content` and `space` on 2026-09-14 and the three
+    Measured on the six routes that call it, `content` and `space` on 2026-09-14 and the four
     under `content/{id}` on 2026-09-23: `?limit=-1` and `?start=-1` are 400. Unclamped they reached
     SQLite, which reads a negative LIMIT as no limit at all — so the answer to `?limit=-1` was the
     whole collection.
@@ -2013,9 +2039,10 @@ def _confluence_page_params(
 
     ``default`` and ``cap`` are per route, measured 2026-09-22 on a live site: `content`, `space`
     and `child/comment` cap `limit` at 1000, `label` defaults to 200 and caps there, `child/page`
-    defaults to 25 and caps nowhere (`?limit=1001` is echoed), and the CQL search caps nowhere
-    either. A value above the cap is answered with the cap rather than refused, so a client asking
-    for more than real serves gets real's page size back.
+    defaults to 25 and caps nowhere (`?limit=1001` is echoed), `child/attachment` defaults to 50
+    and caps nowhere, and the CQL search caps nowhere either. A value above the cap is answered
+    with the cap rather than refused, so a client asking for more than real serves gets real's page
+    size back.
     """
     limit = _int_param(request, "limit", default)
     start = _int_param(request, "start", 0)

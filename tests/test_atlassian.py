@@ -1543,6 +1543,7 @@ _CAPS = [
     ("child/comment", "comment", 1001, 1000),
     ("label", "label", 1001, 200),
     ("child/page", "child", 1001, 1001),  # the one listing real caps nowhere
+    ("child/attachment", "attachment", 1001, 1001),
 ]
 
 
@@ -1568,6 +1569,9 @@ def test_confluence_label_defaults_to_two_hundred_where_the_others_default_to_25
     api = "/atlassian/wiki/rest/api"
     cid = client.get(f"{api}/content?limit=1", headers=admin_h).json()["results"][0]["id"]
     assert client.get(f"{api}/content/{cid}/label", headers=admin_h).json()["limit"] == 200
+    assert (
+        client.get(f"{api}/content/{cid}/child/attachment", headers=admin_h).json()["limit"] == 50
+    )
     for path in (
         f"{api}/content",
         f"{api}/space",
@@ -1593,7 +1597,7 @@ def test_confluence_content_refuses_a_start_above_the_bound_where_space_serves_o
     assert client.get(f"{api}/space?start=100001", headers=admin_h).status_code == 200
 
 
-_PAGED = ["content", "space", "child/page", "child/comment", "label"]
+_PAGED = ["content", "space", "child/page", "child/comment", "child/attachment", "label"]
 
 
 @pytest.mark.parametrize("route", _PAGED)
@@ -1675,7 +1679,24 @@ def test_confluence_label_serves_one_of_two_labels_and_a_next(client, admin_h):
     assert page["_links"]["next"].endswith("next=true&limit=1&start=1")
 
 
-@pytest.mark.parametrize("route", ["child/page", "child/comment", "label"])
+def test_confluence_child_attachment_serves_an_empty_page_envelope(client, admin_h):
+    """Measured 2026-09-22: every corpus page answers 200 with `start: 0`, `limit: 50`, `size: 0`
+    and `_links` carrying `base`, `context` and `self` when it holds no attachments."""
+    api = "/atlassian/wiki/rest/api"
+    page = client.get(f"{api}/content?limit=1", headers=admin_h).json()["results"][0]["id"]
+    r = client.get(f"{api}/content/{page}/child/attachment", headers=admin_h)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["start"] == 0 and body["limit"] == 50 and body["size"] == 0 and body["results"] == []
+    links = body["_links"]
+    assert links["context"] == "/wiki"
+    assert links["base"].endswith("/wiki")
+    assert links["self"].endswith(f"/rest/api/content/{page}/child/attachment")
+    second = client.get(f"{api}/content/{page}/child/attachment?limit=1&start=1", headers=admin_h)
+    assert second.json()["_links"]["prev"].endswith("prev=true&limit=1&start=0")
+
+
+@pytest.mark.parametrize("route", ["child/page", "child/comment", "child/attachment", "label"])
 def test_confluence_child_listings_refuse_a_limit_they_cannot_convert(client, admin_h, route):
     """Measured: each answers Spring's two-key 400, the same body `content` gives."""
     api = "/atlassian/wiki/rest/api"
