@@ -1092,6 +1092,21 @@ def test_confluence_child_page_and_restriction_match_a_nonexistent_id_for_an_out
         assert hidden.content == made_up.content
 
 
+def test_confluence_child_attachment_is_acl_scoped(client, admin_h, tokens):
+    """The new listing resolves the page through `visible_ids`, so an outsider's read is
+    byte-identical to a made-up id while an admin's is 200."""
+    cid = served_id("confluence", "cf-comp")  # people-only
+    path = f"/atlassian/wiki/rest/api/content/{cid}/child/attachment"
+    served = client.get(path, headers=admin_h)
+    assert served.status_code == 200, served.text
+
+    h = {"Authorization": f"Bearer {tokens['ava@acme.com']}"}  # engineering; cannot see cf-comp
+    hidden = client.get(path, headers=h)
+    made_up = client.get("/atlassian/wiki/rest/api/content/999999999/child/attachment", headers=h)
+    assert hidden.status_code == made_up.status_code == 404
+    assert hidden.content == made_up.content
+
+
 # --- Jira: a page of comments is a page -------------------------------------------------------
 #
 # Measured against Jira Cloud on an issue with no comments, which settles every one of these:
