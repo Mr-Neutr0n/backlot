@@ -1687,7 +1687,9 @@ def test_confluence_child_attachment_serves_an_empty_page_envelope(client, admin
     r = client.get(f"{api}/content/{page}/child/attachment", headers=admin_h)
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["start"] == 0 and body["limit"] == 50 and body["size"] == 0 and body["results"] == []
+    assert (
+        body["start"] == 0 and body["limit"] == 50 and body["size"] == 0 and body["results"] == []
+    )
     links = body["_links"]
     assert links["context"] == "/wiki"
     assert links["base"].endswith("/wiki")
