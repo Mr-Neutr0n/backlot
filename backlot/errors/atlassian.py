@@ -263,6 +263,55 @@ def cql_required() -> AtlassianError:
     )
 
 
+_CONFLUENCE_SERVICE_DATA = {
+    "authorized": True,
+    "valid": True,
+    "errors": [],
+    "successful": True,
+}
+
+
+def no_space_with_key(space_key: str) -> AtlassianError:
+    """`content`'s refusal of a `spaceKey` naming no space, measured 2026-09-22.
+
+    A repeated `spaceKey` is read as the comma-join, and because no space key holds a comma the
+    join is refused the same way. The body carries the `data` object :func:`start_too_large`
+    describes.
+    """
+    return AtlassianError(
+        404,
+        {
+            "statusCode": 404,
+            "data": dict(_CONFLUENCE_SERVICE_DATA),
+            "message": (
+                "com.atlassian.confluence.api.service.exceptions.api.NotFoundException: "
+                f"No space with key : {space_key}"
+            ),
+        },
+    )
+
+
+def unknown_content_type(type_value: str) -> AtlassianError:
+    """`content`'s refusal of a `type` outside Confluence's vocabulary, measured 2026-09-22.
+
+    Real accepts `page` and `blogpost` on a site with none of the latter; the check is against the
+    vocabulary, not the corpus. The match is case-sensitive. A repeated `type` is read as the
+    comma-join and refused naming the join.
+    """
+    return AtlassianError(
+        501,
+        {
+            "statusCode": 501,
+            "data": dict(_CONFLUENCE_SERVICE_DATA),
+            "message": (
+                "com.atlassian.confluence.api.service.exceptions.unchecked."
+                "NotImplementedServiceException: Cannot find custom content type : "
+                f"{type_value}"
+            ),
+        },
+    )
+
+
 def start_too_large() -> AtlassianError:
     """`content`'s refusal of a `start` above 100000, which `space` does not share.
 

@@ -1132,8 +1132,8 @@ def _space_container_for_key(conn, space_key: str) -> str | None:
     """Resolve a Confluence ``spaceKey`` to its backing container name. Backlot models a space
     by its corpus name, so both the synthesized key (``synth.confluence_space_key(name)``, the
     hash-suffixed value ``/space`` advertises) and the literal container name (e.g. ``"handbook"``,
-    a legitimate natural key) resolve. Anything else is unresolvable -> ``None`` (never a silent
-    fall-through to "no filter": callers must treat ``None`` as "0 results", not "everything")."""
+    a legitimate natural key) resolve.     Anything else is unresolvable -> ``None``. The content listing refuses an unresolvable key with
+    :func:`backlot.errors.atlassian.no_space_with_key` rather than an empty page."""
     for r in store.list_containers(conn, "confluence"):
         if space_key == synth.confluence_space_key(r["name"]) or space_key == r["name"]:
             return r["name"]
@@ -1496,19 +1496,20 @@ async def confluence_content_list(request: Request):
     caller = _confluence_caller(request)
     ids = auth.visible_ids(request, caller)
     expand = _str_param(request, "expand", "") or ""
-    space_key = _str_param(request, "spaceKey")
     limit, start = _confluence_page_params(request, cap=1000, start_bound=_CONTENT_START_BOUND)
+    space_key = _str_param(request, "spaceKey")
     if space_key:
+        if "," in space_key:
+            raise errors_atlassian.no_space_with_key(space_key)
         container = _space_container_for_key(conn, space_key)
         if container is None:
-            # spaceKey given but unresolvable: real Confluence returns zero matches, never the
-            # unfiltered corpus — do not let this collapse to the "no spaceKey" (container=None) case.
-            links = _confluence_envelope(
-                request, "/rest/api/content", start=start, limit=limit, size=0, total=0
-            )
-            return {"results": [], "start": start, "limit": limit, "size": 0, "_links": links}
+            raise errors_atlassian.no_space_with_key(space_key)
     else:
         container = None
+    content_type = _str_param(request, "type") if request.query_params.getlist("type") else None
+    if content_type:
+        if "," in content_type or content_type not in _CONFLUENCE_CONTENT_TYPES:
+            raise errors_atlassian.unknown_content_type(content_type)
     # Measured on a Confluence Cloud tenant on 2026-10-03 and 2026-10-05: `title` answered the page
     # with that title whether spelled as stored, in lower case or in upper case, with or without
     # `spaceKey`, with no `next` when asked for one page at a time. A title no page has answered
@@ -1516,10 +1517,18 @@ async def confluence_content_list(request: Request):
     # space alone, and a repeated `title` in either order (`_str_param` joins it with a comma); an
     # empty `title` filters nothing.
     title = _str_param(request, "title") or None
-    total = store.count_documents(conn, "confluence", container, ids, title=title)
-    rows = store.list_documents(
-        conn, "confluence", container, ids, limit=limit, offset=start, title=title
-    )
+    if content_type:
+        rows = store.list_documents(
+            conn, "confluence", container, ids, limit=100_000, offset=0, title=title
+        )
+        rows = [r for r in rows if (r["subtype"] or "page") == content_type]
+        total = len(rows)
+        rows = rows[start : start + limit]
+    else:
+        total = store.count_documents(conn, "confluence", container, ids, title=title)
+        rows = store.list_documents(
+            conn, "confluence", container, ids, limit=limit, offset=start, title=title
+        )
     results = [_confluence_page(conn, request, r, expand) for r in rows]
     links = _confluence_envelope(
         request, "/rest/api/content", start=start, limit=limit, size=len(rows), total=total
@@ -2158,6 +2167,9 @@ def _cql_position(matched: list, sort_value) -> int:
 # neighbours: an empty page on `space` and on `child/page`, and on the CQL search the page `start`
 # does not position (:func:`_cql_position`).
 _CONTENT_START_BOUND = 100_000
+# Measured 2026-09-22 on `GET /wiki/rest/api/content`: `type=page` and `type=blogpost` are 200;
+# any other spelling (including `Page`) is a 501 naming the value sent.
+_CONFLUENCE_CONTENT_TYPES = frozenset({"page", "blogpost"})
 
 
 def _cql_cursor(served: list, matched: list, position: int) -> str | None:

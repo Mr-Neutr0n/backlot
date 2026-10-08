@@ -488,15 +488,39 @@ def test_confluence_content_filtered_by_space_key(client, admin_h):
     ).json()
     assert {r["title"] for r in by_synth_key["results"]} == titles
 
-    # an unresolvable spaceKey is strict: zero results, not the unfiltered corpus
+    # an unresolvable spaceKey is refused, not an empty page and not the unfiltered corpus
     bogus = client.get(
         "/atlassian/wiki/rest/api/content", headers=admin_h, params={"spaceKey": "BOGUS_NOPE"}
-    ).json()
-    assert bogus["results"] == [] and bogus["size"] == 0
+    )
+    assert bogus.status_code == 404
+    assert "No space with key : BOGUS_NOPE" in bogus.json()["message"]
 
     # no spaceKey at all -> unfiltered (still includes the other space)
     unfiltered = client.get("/atlassian/wiki/rest/api/content", headers=admin_h).json()
     assert "Compensation Bands 2026" in {r["title"] for r in unfiltered["results"]}
+
+
+def test_confluence_content_refuses_unknown_space_key_and_type(client, admin_h):
+    """Measured 2026-09-22: an unknown `spaceKey` is a 404 naming the key, a repeated one names the
+    comma-join, and an unknown `type` is a 501 naming the value — case-sensitive, comma-joined
+    when repeated."""
+    api = "/atlassian/wiki/rest/api/content"
+    data = {"authorized": True, "valid": True, "errors": [], "successful": True}
+    for params, status, fragment in (
+        ({"spaceKey": "NOPE"}, 404, "No space with key : NOPE"),
+        ({"spaceKey": ["NOPE1", "NOPE2"]}, 404, "No space with key : NOPE1,NOPE2"),
+        ({"type": "bogus", "limit": 1}, 501, "Cannot find custom content type : bogus"),
+        ({"type": "Page", "limit": 1}, 501, "Cannot find custom content type : Page"),
+        ({"type": ["page", "bogus"], "limit": 1}, 501, "Cannot find custom content type : page,bogus"),
+    ):
+        r = client.get(api, headers=admin_h, params=params)
+        assert r.status_code == status, (params, r.text)
+        body = r.json()
+        assert body["statusCode"] == status
+        assert body["data"] == data
+        assert fragment in body["message"]
+    assert client.get(api, headers=admin_h, params={"type": "page", "limit": 1}).status_code == 200
+    assert client.get(api, headers=admin_h, params={"type": "blogpost", "limit": 1}).status_code == 200
 
 
 def test_confluence_content_filtered_by_title(client, admin_h, tokens):
