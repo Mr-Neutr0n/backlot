@@ -4090,3 +4090,39 @@ def test_jira_issue_ids_that_hash_alike_each_read_back_their_own_issue(tmp_path,
         assert parent["subtasks"][0]["self"].endswith("/issue/" + ids["PAY-2172"])
         child = c.get(path + ids["PAY-2172"], headers=h).json()["fields"]
         assert child["parent"]["id"] == ids["PAY-1425"]
+
+
+_SEARCH = "/atlassian/wiki/rest/api/search?cql=type%3Dpage"
+
+
+@pytest.mark.parametrize(
+    "method,path,credential,status,cached",
+    [
+        ("GET", _SEARCH + "&limit=1", "admin", 200, True),
+        ("HEAD", _SEARCH + "&limit=1", "admin", 200, True),
+        ("GET", _SEARCH + "&limit=-1", "admin", 400, True),
+        ("GET", _SEARCH + "&limit=abc", "admin", 404, True),
+        ("HEAD", _SEARCH + "&start=abc", "admin", 404, True),
+        ("GET", _SEARCH + "&limit=2&cursor=abc", "admin", 400, True),
+        ("GET", _SEARCH + "&limit=1", None, 403, True),
+        ("HEAD", _SEARCH + "&limit=1", None, 403, True),
+        ("GET", _SEARCH + "&limit=1", "Basic !!!", 401, False),
+        ("HEAD", _SEARCH + "&limit=1", "Basic !!!", 401, False),
+        ("POST", _SEARCH + "&limit=1", "admin", 405, False),
+        ("OPTIONS", _SEARCH + "&limit=1", "admin", 200, False),
+        ("GET", "/atlassian/wiki/rest/api/content?limit=1", "admin", 200, False),
+    ],
+)
+def test_confluence_search_carries_the_cache_pair_where_real_does(
+    client, admin_h, method, path, credential, status, cached
+):
+    """Pins where ``backlot.routers.atlassian.vendor_headers`` puts the search's `cache-control`
+    and `expires`, each row's status and headers as Confluence Cloud answered it."""
+    headers = {"admin": admin_h, None: {}}.get(credential, {"Authorization": credential})
+    r = client.request(method, path, headers=headers)
+    assert r.status_code == status, r.text
+    if cached:
+        assert r.headers["cache-control"] == "no-cache, no-store, must-revalidate"
+        assert r.headers["expires"] == "Thu, 01 Jan 1970 00:00:00 GMT"
+    else:
+        assert "cache-control" not in r.headers and "expires" not in r.headers
