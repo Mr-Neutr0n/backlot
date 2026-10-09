@@ -336,46 +336,38 @@ def test_gmail_threads_list_is_the_mailbox_searched_or_not(client, tokens):
     )
 
 
-def test_gmail_attachment_resolves_under_a_hex_message_id(client, admin_h, ro_conn):
-
-    row = ro_conn.execute(
-        "SELECT * FROM gmail_messages WHERE COALESCE(attachments,'') NOT IN ('', '[]') LIMIT 1"
-    ).fetchone()
-    assert row is not None, "SAMPLE should hold a message with an attachment"
-    hexid = row["id"]
-    m = client.get(
-        f"/gmail/v1/users/me/messages/{hexid}", headers=admin_h, params={"format": "full"}
-    ).json()
-    att = next(p for p in m["payload"]["parts"] if p.get("filename"))
-    r = client.get(
-        f"/gmail/v1/users/me/messages/{hexid}/attachments/{att['body']['attachmentId']}",
-        headers=admin_h,
-    )
-    assert r.status_code == 200 and r.json()["size"] > 0
-
-
 @pytest.mark.parametrize(
-    "msg_key, att_key, expect_status",
-    [
-        ("valid", "valid", 200),
-        ("valid", "bogus", 400),
-        ("valid", "altered", 400),
-        ("missing", "bogus", 400),
-        ("non_hex", "bogus", 400),
-    ],
+    "msg_key",
+    ["owner", "other", "missing", "non_hex"],
+)
+@pytest.mark.parametrize(
+    "att_key, expect_status",
+    [("valid", 200), ("bogus", 400), ("altered", 400)],
 )
 def test_gmail_attachment_errors(client, admin_h, ro_conn, msg_key, att_key, expect_status):
+    """Under each of the four message ids, an attachment id gets the answer it gets under its own
+    message: 200 with its bytes when a message holds it, 400 when none does, as the comment in
+    `gmail_attachment` records."""
     row = ro_conn.execute(
         "SELECT * FROM gmail_messages WHERE COALESCE(attachments,'') NOT IN ('', '[]') LIMIT 1"
     ).fetchone()
     assert row is not None, "SAMPLE should hold a message with an attachment"
     hexid = row["id"]
+    other_row = ro_conn.execute(
+        "SELECT id FROM gmail_messages WHERE id != ? LIMIT 1", (hexid,)
+    ).fetchone()
+    assert other_row is not None, "SAMPLE should hold a second gmail message"
     m = client.get(
         f"/gmail/v1/users/me/messages/{hexid}", headers=admin_h, params={"format": "full"}
     ).json()
     valid_att = next(p for p in m["payload"]["parts"] if p.get("filename"))["body"]["attachmentId"]
 
-    msg_id = hexid if msg_key == "valid" else "0000000000000001" if msg_key == "missing" else "zzz"
+    msg_id = {
+        "owner": hexid,
+        "other": other_row["id"],
+        "missing": "0000000000000001",
+        "non_hex": "zzz",
+    }[msg_key]
     att_id = (
         valid_att
         if att_key == "valid"
@@ -405,6 +397,106 @@ def test_gmail_attachment_errors(client, admin_h, ro_conn, msg_key, att_key, exp
                 "status": "INVALID_ARGUMENT",
             }
         }
+    else:
+        owned = client.get(
+            f"/gmail/v1/users/me/messages/{hexid}/attachments/{valid_att}", headers=admin_h
+        ).json()
+        assert owned["size"] > 0
+        assert r.json() == owned
+
+
+_ATTACHMENT_ACL = [
+    {
+        "source_type": "gmail",
+        "doc_id": "ava-deck",
+        "mailbox": "ava",
+        "title": "Deck",
+        "content": "Deck attached.",
+        "author_email": "ava@acme.com",
+        "readers": ["ava@acme.com"],
+        "created": "2026-02-01T09:00:00Z",
+        "attachments": [{"filename": "deck.pdf", "mime": "application/pdf", "content": "deck"}],
+    },
+    {
+        "source_type": "gmail",
+        "doc_id": "ava-memo",
+        "mailbox": "ava",
+        "title": "Memo",
+        "content": "Memo attached.",
+        "author_email": "ava@acme.com",
+        "readers": ["ava@acme.com"],
+        "created": "2026-02-02T09:00:00Z",
+        "attachments": [{"filename": "memo.txt", "mime": "text/plain"}],
+    },
+    {
+        "source_type": "gmail",
+        "doc_id": "mia-note",
+        "mailbox": "mia",
+        "title": "Note",
+        "content": "No attachment.",
+        "author_email": "mia@acme.com",
+        "readers": ["mia@acme.com"],
+        "created": "2026-02-03T09:00:00Z",
+    },
+]
+
+
+@pytest.fixture
+def attachment_acl(tmp_path):
+    """Two of ava's messages with one attachment each, and a message of mia's with none. Yields the
+    client, a header per caller, and each attachment id by the doc it belongs to."""
+    settings = tiny_corpus(tmp_path, _ATTACHMENT_ACL)
+    tokens = yaml.safe_load(settings.tokens_path.read_text())
+    h = {"admin": {"Authorization": f"Bearer {settings.admin_token}"}}
+    for name in ("ava", "mia"):
+        h[name] = {"Authorization": f"Bearer {tok(tokens, f'{name}@acme.com')}"}
+    with client_for(settings, reload=True) as client:
+        att = {}
+        for doc in ("ava-deck", "ava-memo"):
+            m = client.get(
+                f"/gmail/v1/users/me/messages/{served_id('gmail', doc)}", headers=h["admin"]
+            ).json()
+            att[doc] = next(p for p in m["payload"]["parts"] if p.get("filename"))["body"][
+                "attachmentId"
+            ]
+        yield client, h, att
+
+
+@pytest.mark.parametrize("under", ["ava-deck", "ava-memo", "mia-note"])
+@pytest.mark.parametrize("caller", ["admin", "ava", "mia"])
+def test_gmail_attachment_is_found_by_its_id_within_the_acl(
+    attachment_acl, monkeypatch, under, caller
+):
+    """Under each of the three message ids, each of ava's attachment ids lands its own bytes for
+    the admin and ava, and mia, who cannot see ava's messages, gets the 400 an id nothing has gets.
+    The memo states no `content`, so its bytes are the stand-in `_att_content` writes, which names
+    the attachment's id. The scan the comment in `gmail_attachment` describes is skipped only when
+    the path names the message holding the attachment and the caller can see it. It reads ava's two
+    messages for the admin and ava, and none for mia, whose one message holds no attachment."""
+    client, h, att = attachment_acl
+    scanned, scan = [], store.gmail_rows_with_attachments
+
+    def spy(*args, **kwargs):
+        rows = scan(*args, **kwargs)
+        scanned.append({row["id"] for row in rows})
+        return rows
+
+    monkeypatch.setattr(store, "gmail_rows_with_attachments", spy)
+    want = {"ava-deck": b"deck", "ava-memo": f"attachment {att['ava-memo']}".encode()}
+    reads = set() if caller == "mia" else {served_id("gmail", doc) for doc in want}
+    for doc, content in want.items():
+        scanned.clear()
+        r = client.get(
+            f"/gmail/v1/users/me/messages/{served_id('gmail', under)}/attachments/{att[doc]}",
+            headers=h[caller],
+        )
+        if caller == "mia":
+            assert r.status_code == 400, doc
+            assert r.json()["error"]["message"] == "Invalid attachment token", doc
+        else:
+            assert r.status_code == 200, doc
+            assert base64.urlsafe_b64decode(r.json()["data"]) == content, doc
+        assert scanned == ([] if under == doc and caller != "mia" else [reads]), doc
 
 
 @pytest.mark.parametrize(
@@ -528,8 +620,9 @@ def test_gmail_messages_list_pagination_stable_and_ordered(client, admin_h, ro_c
     assert [m["id"] for m in both] == [a, b]  # pages concatenate in order
 
 
-def test_gmail_max_results_is_capped_at_500(tmp_path):
+def test_gmail_max_results_is_capped_at_500(tmp_path, monkeypatch):
     """The cap `_gmail_max_results` records, on both listings."""
+    from backlot.routers import google
     from tests._helpers import corpus_client
 
     records = [
@@ -548,12 +641,104 @@ def test_gmail_max_results_is_capped_at_500(tmp_path):
     with corpus_client(tmp_path, records) as (client, settings):
         h = {"Authorization": f"Bearer {settings.admin_token}"}
         for kind in ("messages", "threads"):
-            for asked, served in ((499, 499), (500, 500), (501, 500), (1000, 500), (100000, 500)):
+            for asked, served in (
+                (499, 499),
+                (500, 500),
+                (501, 500),
+                (1000, 500),
+                (100000, 500),
+                (2147483647, 500),
+            ):
                 page = client.get(
                     f"/gmail/v1/users/me/{kind}", headers=h, params={"maxResults": asked}
                 ).json()
                 assert len(page[kind]) == served, (kind, asked)
                 assert "nextPageToken" in page, (kind, asked)
+        # BACKLOT_MAX_PAGE_SIZE still caps a sent value: 10 serves 5.
+        monkeypatch.setattr(google.get_settings(), "max_page_size", 5)
+        for kind in ("messages", "threads"):
+            page = client.get(
+                f"/gmail/v1/users/me/{kind}", headers=h, params={"maxResults": 10}
+            ).json()
+            assert len(page[kind]) == 5, kind
+            assert "nextPageToken" in page, kind
+
+
+# The rows `_gmail_max_results` records. A `size` is served, `uint32` is the proto layer's refusal
+# of each named repeat, and `maxResults` is `Invalid maxResults`. The measurement is that
+# function's.
+_GMAIL_MAX_RESULTS = [
+    (["+2"], "size", 2),
+    (["02"], "size", 2),
+    (["0", "3"], "size", 3),
+    (["-0"], "uint32", ("-0",)),
+    (["4294967296"], "uint32", ("4294967296",)),
+    (["abc", "3"], "uint32", ("abc",)),
+    (["abc", "def"], "uint32", ("abc", "def")),
+    (["-1"], "uint32", ("-1",)),
+    (["abc"], "uint32", ("abc",)),
+    ([""], "uint32", ("",)),
+    (["1.5"], "uint32", ("1.5",)),
+    (["\u0663"], "uint32", ("\u0663",)),
+    (["-0", "3"], "uint32", ("-0",)),
+    (["0"], "maxResults", None),
+    (["+0"], "maxResults", None),
+    (["00"], "maxResults", None),
+    (["2147483648"], "maxResults", None),
+    (["+2147483648"], "maxResults", None),
+    (["4294967295"], "maxResults", None),
+    (["3", "0"], "maxResults", None),
+    (["3", "2147483648"], "maxResults", None),
+]
+
+
+@pytest.mark.parametrize("kind", ["messages", "threads"])
+@pytest.mark.parametrize("values, shape, named", _GMAIL_MAX_RESULTS)
+def test_gmail_refuses_a_max_results_it_cannot_read(client, admin_h, kind, values, shape, named):
+    """The refusals `_gmail_max_results` records, on both listings."""
+    r = client.get(
+        f"/gmail/v1/users/me/{kind}",
+        headers=admin_h,
+        params=[("maxResults", value) for value in values],
+    )
+    if shape == "size":
+        assert r.status_code == 200, (kind, values, r.text)
+        body = r.json()
+        assert body["resultSizeEstimate"] >= named, (kind, values)
+        assert len(body[kind]) == named, (kind, values)
+        return
+    assert r.status_code == 400, (kind, values, r.text)
+    err = r.json()["error"]
+    if shape == "maxResults":
+        assert err == {
+            "code": 400,
+            "message": "Invalid maxResults",
+            "errors": [
+                {
+                    "message": "Invalid maxResults",
+                    "domain": "global",
+                    "reason": "invalidArgument",
+                }
+            ],
+            "status": "INVALID_ARGUMENT",
+        }, (kind, values)
+        return
+    messages = [f"Invalid value at 'max_results' (TYPE_UINT32), \"{raw}\"" for raw in named]
+    message = "\n".join(messages)
+    assert err == {
+        "code": 400,
+        "message": message,
+        "errors": [{"message": message, "reason": "invalid"}],
+        "status": "INVALID_ARGUMENT",
+        "details": [
+            {
+                "@type": "type.googleapis.com/google.rpc.BadRequest",
+                "fieldViolations": [
+                    {"field": "max_results", "description": one} for one in messages
+                ],
+            }
+        ],
+    }, (kind, values)
 
 
 def test_gmail_attachment_size_matches_part_metadata(client, admin_h, ro_conn):

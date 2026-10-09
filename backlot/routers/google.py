@@ -56,9 +56,10 @@ router = APIRouter(tags=["google"], dependencies=[Depends(_system_parameters)])
 
 
 # --- OpenAPI enrichment --------------------------------------------------
-# Query params are read query-only (via _int/request.query_params); documenting them with
-# openapi_extra keeps the handler bodies untouched and merges cleanly with the auto-generated
-# path params. Response models use extra="allow" so builders' full field set passes through.
+# Query params are read query-only (via request.query_params, a typed one through _typed_query).
+# Documenting them with openapi_extra keeps the handler bodies untouched and merges cleanly with
+# the auto-generated path params. Response models use extra="allow" so builders' full field set
+# passes through.
 
 
 class _GLoose(BaseModel):
@@ -641,11 +642,42 @@ def _by_thread(rows) -> list:
 
 
 def _gmail_max_results(request: Request) -> int:
-    """The page size `messages.list` and `threads.list` serve. A `maxResults` above 500 is capped
-    at 500, not refused: measured on 2026-10-03, `501` and `1000` each answered 500 messages with a
+    """The page size `messages.list` and `threads.list` serve.
+
+    Measured on gmail.googleapis.com on 2026-10-07 with a Workspace user's `gmail.readonly` token,
+    one request per row; `threads.list` answered every row with the same status and error, on
+    2026-10-07 or 2026-10-08. The proto layer parses every repeat as a uint32 and names every repeat
+    it cannot read in one 400, as `Invalid value at 'max_results' (TYPE_UINT32), "<value>"`, the
+    value quoted as sent. `+2` and `02` are numbers. A leading `-` is refused even on `-0`, and so
+    are an empty value, `1.5`, the Arabic-Indic digit `٣` and a value past 2**32 - 1 (`4294967296`).
+    The method reads the last repeat (the pair is in `gerr.first_repeat`'s table): `0` (`+0`, `00`)
+    and anything from 2**31 up (`2147483648`, `+2147483648`, `4294967295`) are `Invalid maxResults`,
+    while `2147483647` is served; `0&3` is 3 and `3&0` is refused. Below 2**31 a value is capped at
+    500, not refused: on 2026-10-03, `501` and `1000` each answered 500 messages with a
     `nextPageToken`, and the reference gives both methods "The maximum allowed value for this field
-    is 500"."""
-    return min(_int(request.query_params.get("maxResults"), get_settings().default_page_size), 500)
+    is 500". With no `maxResults`, the page is the default size capped at 500. A sent value is also
+    capped at the deployment's `max_page_size`.
+    """
+    sizes = _typed_query(request, {"maxResults": _gmail_uint32})["maxResults"]
+    if not sizes:
+        return min(get_settings().default_page_size, 500)
+    size = sizes[-1]
+    if size == 0 or size >= 2**31:
+        raise gerr.invalid_max_results()
+    return min(size, 500, get_settings().max_page_size)
+
+
+# `maxResults` as Gmail's proto layer reads it: a uint32, where Drive's `pageSize` is an int32
+# (`_INT32`). The spellings and the bound are `_gmail_max_results`'s.
+_UINT32 = re.compile(r"\+?[0-9]+")
+
+
+def _gmail_uint32(raw: str) -> int:
+    if _UINT32.fullmatch(raw) and int(raw) < 2**32:
+        return int(raw)
+    raise gerr.invalid_field_value(
+        "max_results", f"Invalid value at 'max_results' (TYPE_UINT32), \"{raw}\""
+    )
 
 
 def _gmail_ids(row) -> tuple[str, str]:
@@ -730,25 +762,35 @@ async def gmail_attachment(user_id: str, msg_id: str, att_id: str, request: Requ
     conn = auth.conn(request)
     caller = _require(request)
     ids = auth.visible_ids(request, caller)
-    # No shape check on the message id: real Gmail's answer here does not depend on it (see
-    # `gerr.invalid_attachment_token`), so a non-hex one is not "Invalid id value" on this route.
-    row = store.gmail_by_id(conn, msg_id, visible_ids=ids)
-    if row is None:
+    # The path's message id plays no part in the answer, in real Gmail or here: an attachment id
+    # is served under the message it belongs to, under another message's id, under a well-formed
+    # id no message has and under a non-hex id alike, with the same bytes, measured against
+    # gmail.googleapis.com on 2026-10-01 and again on 2026-10-07. The message the path names is
+    # one point lookup, so it is tried first; only an attachment id it does not hold pays for
+    # scanning every attachment-bearing message the caller can see.
+    named = store.gmail_by_id(conn, msg_id, visible_ids=ids)
+    found = _attachment([] if named is None else [named], att_id) or _attachment(
+        store.gmail_rows_with_attachments(conn, visible_ids=ids), att_id
+    )
+    if found is None:
         raise gerr.invalid_attachment_token()
-    message_id = row["id"]
-    found = next(
+    message_id, i, att = found
+    body = _att_content(message_id, i, att)
+    # `{size, data}` alone: real names no `attachmentId` here, measured on 2026-09-30
+    return {"size": _byte_len(body), "data": _b64url(body)}
+
+
+def _attachment(rows, att_id: str) -> tuple[str, int, dict] | None:
+    """The message id, index and attachment among ``rows`` whose ``_att_id`` is ``att_id``."""
+    return next(
         (
-            (i, a)
+            (row["id"], i, a)
+            for row in rows
             for i, a in enumerate(store.jcol(row, "attachments"))
-            if _att_id(message_id, i) == att_id
+            if _att_id(row["id"], i) == att_id
         ),
         None,
     )
-    if not found:
-        raise gerr.invalid_attachment_token()
-    body = _att_content(message_id, found[0], found[1])
-    # `{size, data}` alone: real names no `attachmentId` here, measured on 2026-09-30
-    return {"size": _byte_len(body), "data": _b64url(body)}
 
 
 @router.get(
@@ -4593,10 +4635,3 @@ def _drive_page_size(sizes: list[int]) -> int:
     first = sizes[0]
     size = 1000 if first > 1000 else 500 if first < 1 else first
     return min(size, get_settings().max_page_size)
-
-
-def _int(v: str | None, default: int) -> int:
-    try:
-        return min(int(v), get_settings().max_page_size) if v else default
-    except ValueError:
-        return default
