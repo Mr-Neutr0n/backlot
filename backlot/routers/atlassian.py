@@ -1625,26 +1625,31 @@ async def confluence_comments(content_id: int, request: Request):
 
 @router.get("/wiki/rest/api/content/{content_id}/child/attachment", openapi_extra=_P_CONTENT_CHILD)
 async def confluence_attachments(content_id: int, request: Request):
+    """A page's attachments, which is the empty page for every page: a corpus record states no
+    attachment, and this is the page real answers for a page holding none.
+
+    Measured 2026-10-10: `limit` and `start` are read before the page is looked up, so
+    `content/999999999/child/attachment?limit=abc` is the conversion 400 and `?limit=-1` the
+    negative one, not the unknown id's 404.
+    """
     conn = auth.conn(request)
     caller = _confluence_caller(request)
+    limit, start = _confluence_page_params(request, default=50)
     ids = auth.visible_ids(request, caller)
     if store.get_document(conn, "confluence", content_id, visible_ids=ids) is None:
         raise HTTPException(status_code=404, detail="No content found with id")
-    limit, start = _confluence_page_params(request, default=50)
-    attachments: list = []
-    page = attachments[start : start + limit]
     return {
-        "results": page,
+        "results": [],
         "start": start,
         "limit": limit,
-        "size": len(page),
+        "size": 0,
         "_links": _confluence_envelope(
             request,
             f"/rest/api/content/{content_id}/child/attachment",
             start=start,
             limit=limit,
-            size=len(page),
-            total=len(attachments),
+            size=0,
+            total=0,
         ),
     }
 
@@ -2036,10 +2041,10 @@ def _confluence_page_params(
 ) -> tuple[int, int]:
     """Confluence's `limit` and `start`, which refuse a negative where Jira's clamp one.
 
-    Measured on the six routes that call it, `content` and `space` on 2026-09-14 and the four
-    under `content/{id}` on 2026-09-23: `?limit=-1` and `?start=-1` are 400. Unclamped they reached
-    SQLite, which reads a negative LIMIT as no limit at all — so the answer to `?limit=-1` was the
-    whole collection.
+    Measured on the six routes that call it, `content` and `space` on 2026-09-14, `child/page`,
+    `child/comment` and `label` on 2026-09-23 and `child/attachment` on 2026-10-10: `?limit=-1` and
+    `?start=-1` are 400. Unclamped, `content` would hand them to SQLite, which reads a negative
+    LIMIT as no limit at all and so would answer `?limit=-1` with the whole collection.
 
     Order is measured too, because both parameters can be wrong at once. Conversion comes first for
     BOTH — `?limit=-1&start=abc` is the conversion failure about `abc`, not the negative about
@@ -2244,10 +2249,11 @@ def _confluence_envelope(
     """`_links` as every paged Confluence listing answers it: `base`, `context` and `self` on every
     page, plus `next`/`prev` from :func:`backlot.pagination.confluence_page_links`.
 
-    Measured 2026-09-22 on `content`, `space`, the CQL `search` and the three listings under
-    `content/{id}`: all three keys ride every page, `context` is the product's own prefix and
-    `self` is the request's URL with `limit`, `start` and the two markers removed and every other
-    parameter kept — a cache-buster sent with the request comes back inside `self`.
+    Measured 2026-09-22 on `content`, `space`, the CQL `search`, `child/page`, `child/comment` and
+    `label`, and 2026-10-10 on `child/attachment`: all three keys ride every page, `context` is the
+    product's own prefix and `self` is the request's URL with `limit`, `start` and the two markers
+    removed and every other parameter kept — a cache-buster sent with the request comes back inside
+    `self`.
 
     ``cursor``, ``sent_cursor`` and ``reached`` are the CQL search's: the token this page's `next`
     carries, the one the request brought, and where among the matches the page ends, as
@@ -2525,7 +2531,8 @@ def _options_answer(request: Request) -> Response:
     happens to implement (`errors.atlassian.jira_options_allow`). Confluence answers 404 in the
     `errors` list its 405 uses, on every route measured but `search` (:func:`_search_options`), for
     the `Accept` values ``errors.atlassian.CONFLUENCE_OPTIONS_NOT_FOUND`` names. Measured on
-    Atlassian Cloud, 2026-09-22, over all 24 routes here.
+    Atlassian Cloud over every route here, `child/attachment` on 2026-10-10 and the others on
+    2026-09-22.
 
     Jira's 200 is for a caller whose credential resolves. Anyone else — no credential, the Basic
     pair it rejects, an unknown scheme, and here an unreadable bearer too, which a `GET` draws the
@@ -2834,7 +2841,8 @@ def rate_limit_headers(request: Request, caller: Caller) -> dict[str, str]:
 #: Confluence says its v1 REST API is deprecated, in three headers, on the answers the content and
 #: space services give — including their 404s. Measured 2026-09-22: `content`, `content/{id}`,
 #: `child/comment`, `child/page`, `label`, `space`, `space/{key}` and the 404s for an unknown space
-#: and an unknown content id all carry them; `search`, `restriction/byOperation`, the 405 at
+#: and an unknown content id all carry them, and so do `child/attachment`, its 400 and an unknown
+#: id's 404, measured 2026-10-10; `search`, `restriction/byOperation`, the 405 at
 #: `space/{key}/permission`, the 403 an anonymous request gets and an `OPTIONS` on `space`,
 #: `space/{key}`, an unknown space and `permission` carry none. Nor does an answer the catch-all
 #: gives, measured 2026-09-30 over twenty of them on ten paths: the JAX-RS 404 in both shapes and

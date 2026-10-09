@@ -38,6 +38,7 @@ Ordered as the table above, by `source_type`.
 |---|---|
 | `content` | `spaceKey`, `title` (the whole title, ignoring ASCII case) |
 | `content/{id}` | |
+| `content/{id}/child/attachment` | always the empty page: a record states no attachment |
 | `content/{id}/child/comment` | |
 | `content/{id}/child/page` | |
 | `content/{id}/label` | |

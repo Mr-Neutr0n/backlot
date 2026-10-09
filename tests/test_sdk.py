@@ -481,6 +481,9 @@ def confluence():
     check("Confluence", "child/comment")(
         lambda: f"{cf.get(f'rest/api/content/{child}/child/comment')['size']} comments"
     )
+    check("Confluence", "child/attachment")(
+        lambda: f"{cf.get_attachments_from_content(child)['size']} attachments"
+    )
     check("Confluence", "content/{id}/label")(
         lambda: ",".join(x["name"] for x in cf.get(f"rest/api/content/{child}/label")["results"])
     )
