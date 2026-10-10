@@ -515,7 +515,11 @@ def test_confluence_content_refuses_unknown_space_key_and_type(client, admin_h):
         ({"spaceKey": ["NOPE1", "NOPE2"]}, 404, "No space with key : NOPE1,NOPE2"),
         ({"type": "bogus", "limit": 1}, 501, "Cannot find custom content type : bogus"),
         ({"type": "Page", "limit": 1}, 501, "Cannot find custom content type : Page"),
-        ({"type": ["page", "bogus"], "limit": 1}, 501, "Cannot find custom content type : page,bogus"),
+        (
+            {"type": ["page", "bogus"], "limit": 1},
+            501,
+            "Cannot find custom content type : page,bogus",
+        ),
     ):
         r = client.get(api, headers=admin_h, params=params)
         assert r.status_code == status, (params, r.text)
@@ -524,7 +528,9 @@ def test_confluence_content_refuses_unknown_space_key_and_type(client, admin_h):
         assert body["data"] == data
         assert fragment in body["message"]
     assert client.get(api, headers=admin_h, params={"type": "page", "limit": 1}).status_code == 200
-    assert client.get(api, headers=admin_h, params={"type": "blogpost", "limit": 1}).status_code == 200
+    assert (
+        client.get(api, headers=admin_h, params={"type": "blogpost", "limit": 1}).status_code == 200
+    )
 
 
 def test_confluence_content_filtered_by_title(client, admin_h, tokens):
