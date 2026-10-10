@@ -1151,11 +1151,12 @@ def list_documents(
     not_author_email=None,
     exclude_trashed=False,
     title=None,
+    subtype=None,
 ) -> list[sqlite3.Row]:
     # state: only valid for source_type="github" — it's the only items table with a `state`
     # column; passing it for any other source_type raises sqlite3.OperationalError. Likewise
     # exclude_trashed, which only gdrive_files has a column for. title matches the whole title,
-    # ignoring ASCII case.
+    # ignoring ASCII case. subtype is Confluence's content type, where a row with none is a page.
     tbl = table(source_type)
     sql = f"SELECT * FROM {tbl} WHERE 1=1"
     params: list = []
@@ -1168,6 +1169,9 @@ def list_documents(
     if title is not None:
         sql += " AND title = ? COLLATE NOCASE"
         params.append(title)
+    if subtype is not None:
+        sql += " AND COALESCE(subtype, 'page') = ?"
+        params.append(subtype)
     clause, cparams = _acl_clause(source_type, visible_ids=visible_ids)
     sql += clause + f" ORDER BY {_order_by(source_type)} LIMIT ? OFFSET ?"
     params += cparams + [limit, offset]
@@ -1979,6 +1983,7 @@ def count_documents(
     exclude_trashed=False,
     roots_only=False,
     title=None,
+    subtype=None,
 ) -> int:
     # state: only valid for source_type="github" — it's the only items table with a `state`
     # column; passing it for any other source_type raises sqlite3.OperationalError. Likewise
@@ -1999,6 +2004,9 @@ def count_documents(
     if title is not None:
         sql += " AND title = ? COLLATE NOCASE"
         params.append(title)
+    if subtype is not None:
+        sql += " AND COALESCE(subtype, 'page') = ?"
+        params.append(subtype)
     clause, cparams = _acl_clause(source_type, visible_ids=visible_ids)
     sql += clause
     params += cparams

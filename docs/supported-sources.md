@@ -36,7 +36,7 @@ Ordered as the table above, by `source_type`.
 
 | Endpoint | Notes |
 |---|---|
-| `content` | `spaceKey`, `title` (the whole title, ignoring ASCII case) |
+| `content` | `spaceKey`, `type` (`page` or `blogpost`), `title` (the whole title, ignoring ASCII case). An unknown `spaceKey`, one the caller cannot reach and a repeated one are real's 404, and each other `type` gets real's answer (`backlot.routers.atlassian._CONTENT_TYPES`) |
 | `content/{id}` | |
 | `content/{id}/child/attachment` | always the empty page: a record states no attachment |
 | `content/{id}/child/comment` | |

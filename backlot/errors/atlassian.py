@@ -263,50 +263,72 @@ def cql_required() -> AtlassianError:
     )
 
 
-_CONFLUENCE_SERVICE_DATA = {
-    "authorized": True,
-    "valid": True,
-    "errors": [],
-    "successful": True,
-}
+def _service_refusal(status: int, exception: str, message: str) -> AtlassianError:
+    """A refusal Confluence's API service layer raises: `statusCode`, the `data` object it always
+    carries, and the exception's name before its message, as :func:`start_too_large` records."""
+    return AtlassianError(
+        status,
+        {
+            "statusCode": status,
+            "data": {"authorized": True, "valid": True, "errors": [], "successful": True},
+            "message": f"com.atlassian.confluence.api.service.exceptions.{exception}: {message}",
+        },
+    )
 
 
 def no_space_with_key(space_key: str) -> AtlassianError:
-    """`content`'s refusal of a `spaceKey` naming no space, measured 2026-09-22.
+    """`content`'s refusal of a space key naming no space, as sent: the key is not trimmed (`' '` is
+    named as a space), and a repeated one is its comma-join, which no key holds. Where it comes
+    among the route's other refusals is ``routers.atlassian._CONTENT_TYPES``'s."""
+    return _service_refusal(404, "api.NotFoundException", f"No space with key : {space_key}")
 
-    A repeated `spaceKey` is read as the comma-join, and because no space key holds a comma the
-    join is refused the same way. The body carries the `data` object :func:`start_too_large`
-    describes.
-    """
+
+def unknown_content_type(type_value: str) -> AtlassianError:
+    """`content`'s refusal of a content type Confluence does not have, named as sent, when neither
+    a space nor a title is given. The types it has, and the measurement, are
+    ``routers.atlassian._CONTENT_TYPES``'s."""
+    return _service_refusal(
+        501,
+        "unchecked.NotImplementedServiceException",
+        f"Cannot find custom content type : {type_value}",
+    )
+
+
+def content_finder_cannot_fetch(content_type: str) -> AtlassianError:
+    """`content`'s 501 for `type=comment` and `type=folder`, measured 2026-10-10: the message names
+    the type in the plural."""
+    return _service_refusal(
+        501,
+        "unchecked.NotImplementedServiceException",
+        f"Cannot fetch {content_type}s with ContentFinder",
+    )
+
+
+def not_a_custom_content_type(content_type: str) -> AtlassianError:
+    """`content`'s 400 for `type=whiteboard`, `database` and `embed`, measured 2026-10-10: the bare
+    exception string, as :func:`negative_not_allowed` is."""
     return AtlassianError(
-        404,
+        400,
         {
-            "statusCode": 404,
-            "data": dict(_CONFLUENCE_SERVICE_DATA),
+            "statusCode": 400,
             "message": (
-                "com.atlassian.confluence.api.service.exceptions.api.NotFoundException: "
-                f"No space with key : {space_key}"
+                f"java.lang.IllegalArgumentException: Type is not a custom content type : "
+                f"{content_type}"
             ),
         },
     )
 
 
-def unknown_content_type(type_value: str) -> AtlassianError:
-    """`content`'s refusal of a `type` outside Confluence's vocabulary, measured 2026-09-22.
-
-    Real accepts `page` and `blogpost` on a site with none of the latter; the check is against the
-    vocabulary, not the corpus. The match is case-sensitive. A repeated `type` is read as the
-    comma-join and refused naming the join.
-    """
+def attachment_without_container() -> AtlassianError:
+    """`content`'s 500 for `type=attachment`, which real answers alone, beside a space and beside a
+    title alike (2026-10-10): a `NullPointerException` with no `data`."""
     return AtlassianError(
-        501,
+        500,
         {
-            "statusCode": 501,
-            "data": dict(_CONFLUENCE_SERVICE_DATA),
+            "statusCode": 500,
             "message": (
-                "com.atlassian.confluence.api.service.exceptions.unchecked."
-                "NotImplementedServiceException: Cannot find custom content type : "
-                f"{type_value}"
+                'java.lang.NullPointerException: Cannot invoke "com.atlassian.confluence.api.model.'
+                'content.id.ContentId.asLong()" because "containerId" is null'
             ),
         },
     )
@@ -320,18 +342,11 @@ def start_too_large() -> AtlassianError:
     negative 400 above carry `statusCode` and `message` alone. `start=100000` is a 200, so the
     bound is inclusive.
     """
-    return AtlassianError(
+    return _service_refusal(
         400,
-        {
-            "statusCode": 400,
-            "data": {"authorized": True, "valid": True, "errors": [], "successful": True},
-            "message": (
-                "com.atlassian.confluence.api.service.exceptions.api.BadRequestException: "
-                "Start of this size is no longer supported. If you need to fetch this amount of "
-                "content, please use either the search endpoint or get the content by a space at "
-                "a time."
-            ),
-        },
+        "api.BadRequestException",
+        "Start of this size is no longer supported. If you need to fetch this amount of content, "
+        "please use either the search endpoint or get the content by a space at a time.",
     )
 
 
